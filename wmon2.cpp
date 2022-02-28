@@ -3,14 +3,13 @@
 #include <windows.h>
 #include <tchar.h>
 #include <windowsx.h>
-#include <ole2.h>
-#include <commctrl.h>
 #include <shlwapi.h>
 #include <strsafe.h>
 #include <string>
 #include <fstream>
 #include <list>
 #include <psapi.h>
+#include <algorithm>
 #include "inipp/inipp/inipp.h"
 
 using namespace std;
@@ -25,11 +24,11 @@ struct WindowConfig
 };
 
 HINSTANCE g_hinst;
-HWND g_hwndChild;
 std::list<WindowConfig> searchList;
 ofstream logfile;
 string topic;
 std::list<HWND> trackedWindows;
+mqtt::client *mqtt_client = nullptr;
 
 
 bool IsToplevel(HWND win)
@@ -62,77 +61,16 @@ string GetProcessNameForWindow(HWND window)
     return string();
 }
 
-/*
- *  OnSize
- *      If we have an inner child, resize it to fit.
- */
-void OnSize(HWND hwnd, UINT state, int cx, int cy)
-{
-    if (g_hwndChild) {
-        MoveWindow(g_hwndChild, 0, 0, cx, cy, TRUE);
-    }
-}
-
-/*
- *  OnCreate
- *      Applications will typically override this and maybe even
- *      create a child window.
- */
-BOOL OnCreate(HWND hwnd, LPCREATESTRUCT lpcs)
-{
-    g_hwndChild = CreateWindow(TEXT("listbox"), NULL, LBS_HASSTRINGS | WS_CHILD | WS_VISIBLE | WS_VSCROLL, 0, 0, 0, 0, hwnd, NULL, g_hinst, 0);
-    if (!g_hwndChild) return FALSE;
-    return TRUE;
-}
-
-/*
- *  OnDestroy
- *      Post a quit message because our application is over when the
- *      user closes this window.
- */
-void OnDestroy(HWND hwnd)
-{
-    PostQuitMessage(0);
-}
-
-/*
- *  OnPaint
- *      Paint the content as part of the paint cycle.
- */
-void OnPaint(HWND hwnd)
-{
-    PAINTSTRUCT ps;
-    BeginPaint(hwnd, &ps);
-    EndPaint(hwnd, &ps);
-}
-
 void alert_window_created(DWORD event, HWND hwnd)
 {
-    _TCHAR szClass[80] = {0};
-    _TCHAR szName[80] = {0};
-    GetClassName(hwnd, szClass, ARRAYSIZE(szClass));
-    GetWindowText(hwnd, szName, ARRAYSIZE(szName));
-    _TCHAR szBuf[80];
-    StringCchPrintf(szBuf, ARRAYSIZE(szBuf), TEXT("%p created \"%s\" (%s)"), hwnd, pszAction, szName, szClass);
-    ListBox_AddString(g_hwndChild, szBuf);
-
-    logfile << "   MATCHED\n";
+    logfile << "   MATCHED hwnd=" << hwnd << "\n";
     trackedWindows.push_back(hwnd);
 }
 
-void alert_window_destroyed(HWND hwnd)
+void alert_window_destroyed(std::list<HWND>::iterator it)
 {
-    _TCHAR szClass[80] = {0};
-    _TCHAR szName[80] = {0};
-    GetClassName(hwnd, szClass, ARRAYSIZE(szClass));
-    GetWindowText(hwnd, szName, ARRAYSIZE(szName));
-    _TCHAR szBuf[80];
-    StringCchPrintf(szBuf, ARRAYSIZE(szBuf), TEXT("%p destroyed \"%s\" (%s)"), hwnd, pszAction, szName, szClass);
-    ListBox_AddString(g_hwndChild, szBuf);
-
-    logfile << "   REMOVED\n";
-
-
+    logfile << "   REMOVED hwnd=" << *it << "\n";
+    trackedWindows.erase(it);
 }
 
 void CALLBACK WinEventProc(
@@ -185,30 +123,22 @@ void CALLBACK WinEventProc(
                 }
             }
         }
-        else
+        else if(EVENT_OBJECT_DESTROY == event)
         {
-            for(auto search_hwnd : trackedWindows)
+            auto it = std::find(trackedWindows.begin(), trackedWindows.end(), hwnd);
+            if(it != std::end(trackedWindows))
             {
-                if(search_hwnd == hwnd)
-                {
-                    alert_window_destroyed(hwnd);
-                    break;
-                }
+                alert_window_destroyed(it);
             }
         }
     }
 }
 
-/*
- *  Window procedure
- */
 LRESULT CALLBACK WndProc(HWND hwnd, UINT uiMsg, WPARAM wParam, LPARAM lParam)
 {
-    switch (uiMsg) {
-    HANDLE_MSG(hwnd, WM_CREATE, OnCreate);
-    HANDLE_MSG(hwnd, WM_SIZE, OnSize);
-    HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);
-    HANDLE_MSG(hwnd, WM_PAINT, OnPaint);
+    if(uiMsg == WM_DESTROY)
+    {
+        PostQuitMessage(0);
     }
     return DefWindowProc(hwnd, uiMsg, wParam, lParam);
 }
@@ -225,9 +155,8 @@ bool InitApp(void)
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszMenuName = NULL;
-    wc.lpszClassName = TEXT("Scratch");
+    wc.lpszClassName = TEXT("wmon_mqtt");
     if (!RegisterClass(&wc)) return false;
-    InitCommonControls(); 
     return true;
 }
 
@@ -243,14 +172,23 @@ bool ReadConfig()
         if(section.first == "default")
         {
             // general config
+            topic = "wmon_mqtt";
             inipp::get_value(section.second, "topic", topic);
             logfile << "MQTT topic: " << topic << "\n";
             string server;
             inipp::get_value(section.second, "server", server);
             logfile << "MQTT server: " << server << "\n";
+            string client_id = "wmon_mqtt";
+            inipp::get_value(section.second, "client_id", client_id);
+            logfile << "MQTT client_id: " << client_id << "\n";
             bool registerHA = false;
             inipp::get_value(section.second, "homeassistant", registerHA);
             if(registerHA) logfile << "Sending HA registration\n";
+            mqtt_client = new mqtt::client(server, client_id);
+            mqtt::connect_options connOpts;
+            connOpts.set_keep_alive_interval(20);
+            connOpts.set_clean_session(true);
+            mqtt_client->connect(connOpts);
         }
         else
         {
@@ -283,13 +221,14 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hinstPrev,
     MSG msg;
     HWND hwnd;
     g_hinst = hinst;
+    mqtt_client = nullptr;
     logfile.open("log.txt");
     if(!InitApp()) return 0;
     if(!ReadConfig()) return 0;
 
     hwnd = CreateWindow(
-        TEXT("Scratch"),                /* Class Name */
-        TEXT("Scratch"),                /* Title */
+        TEXT("wmon_mqtt"),              /* Class Name */
+        TEXT("wmon_mqtt"),              /* Title */
         WS_OVERLAPPEDWINDOW,            /* Style */
         CW_USEDEFAULT, CW_USEDEFAULT,   /* Position */
         CW_USEDEFAULT, CW_USEDEFAULT,   /* Size */
@@ -311,5 +250,10 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hinstPrev,
 
     if (hWinEventHook) UnhookWinEvent(hWinEventHook);
     logfile.close();
+    if(mqtt_client != nullptr)
+    {
+        mqtt_client->disconnect();
+        delete mqtt_client;
+    }
     return 0;
 }
