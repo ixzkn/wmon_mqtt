@@ -1,4 +1,5 @@
 #define STRICT
+#include "mqtt/client.h"
 #include <windows.h>
 #include <tchar.h>
 #include <windowsx.h>
@@ -6,12 +7,30 @@
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <strsafe.h>
-#include <wstring>
+#include <string>
+#include <fstream>
+#include <list>
+#include <psapi.h>
+#include "inipp/inipp/inipp.h"
 
 using namespace std;
 
+struct WindowConfig
+{
+    string title;
+    string classname;
+    string process;
+    string message;
+    bool checkFullscreen;
+};
+
 HINSTANCE g_hinst;
 HWND g_hwndChild;
+std::list<WindowConfig> searchList;
+ofstream logfile;
+string topic;
+std::list<HWND> trackedWindows;
+
 
 bool IsToplevel(HWND win)
 {
@@ -28,19 +47,19 @@ bool IsToplevel(HWND win)
     return false;
 }
 
-wstring GetProcessNameForWindow(HWND window)
+string GetProcessNameForWindow(HWND window)
 {
     DWORD pid = 0;
     GetWindowThreadProcessId(window, &pid);
-    wchar_t string[2048] = {0};
+    char str[2048] = {0};
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (hProcess)
     {
-        GetProcessImageFileName(hProcess, string, 2048);
-        return string;
+        GetProcessImageFileName(hProcess, str, 2048);
         CloseHandle(hProcess);
+        return string(str);
     }
-    return L"";
+    return string();
 }
 
 /*
@@ -77,14 +96,6 @@ void OnDestroy(HWND hwnd)
 }
 
 /*
- *  PaintContent
- *      Interesting things will be painted here eventually.
- */
-void PaintContent(HWND hwnd, PAINTSTRUCT *pps)
-{
-}
-
-/*
  *  OnPaint
  *      Paint the content as part of the paint cycle.
  */
@@ -92,20 +103,36 @@ void OnPaint(HWND hwnd)
 {
     PAINTSTRUCT ps;
     BeginPaint(hwnd, &ps);
-    PaintContent(hwnd, &ps);
     EndPaint(hwnd, &ps);
 }
 
-/*
- *  OnPrintClient
- *      Paint the content as requested by USER.
- */
-void OnPrintClient(HWND hwnd, HDC hdc)
+void alert_window_created(DWORD event, HWND hwnd)
 {
-    PAINTSTRUCT ps;
-    ps.hdc = hdc;
-    GetClientRect(hwnd, &ps.rcPaint);
-    PaintContent(hwnd, &ps);
+    _TCHAR szClass[80] = {0};
+    _TCHAR szName[80] = {0};
+    GetClassName(hwnd, szClass, ARRAYSIZE(szClass));
+    GetWindowText(hwnd, szName, ARRAYSIZE(szName));
+    _TCHAR szBuf[80];
+    StringCchPrintf(szBuf, ARRAYSIZE(szBuf), TEXT("%p created \"%s\" (%s)"), hwnd, pszAction, szName, szClass);
+    ListBox_AddString(g_hwndChild, szBuf);
+
+    logfile << "   MATCHED\n";
+    trackedWindows.push_back(hwnd);
+}
+
+void alert_window_destroyed(HWND hwnd)
+{
+    _TCHAR szClass[80] = {0};
+    _TCHAR szName[80] = {0};
+    GetClassName(hwnd, szClass, ARRAYSIZE(szClass));
+    GetWindowText(hwnd, szName, ARRAYSIZE(szName));
+    _TCHAR szBuf[80];
+    StringCchPrintf(szBuf, ARRAYSIZE(szBuf), TEXT("%p destroyed \"%s\" (%s)"), hwnd, pszAction, szName, szClass);
+    ListBox_AddString(g_hwndChild, szBuf);
+
+    logfile << "   REMOVED\n";
+
+
 }
 
 void CALLBACK WinEventProc(
@@ -117,32 +144,59 @@ void CALLBACK WinEventProc(
     DWORD dwEventThread,
     DWORD dwmsEventTime )
 {
- if (hwnd &&
-     idObject == OBJID_WINDOW &&
-     idChild == CHILDID_SELF &&
-     IsToplevel(hwnd))
- {
-  PCTSTR pszAction = NULL;
-  switch (event) {
-  case EVENT_OBJECT_CREATE:
-   pszAction = TEXT("created");
-   break;
-  case EVENT_OBJECT_DESTROY:
-   pszAction = TEXT("destroyed");
-   break;
-  }
-  if (pszAction) {
-   _TCHAR szClass[80] = {0};
-   _TCHAR szName[80] = {0};
-   if (IsWindow(hwnd)) {
-    GetClassName(hwnd, szClass, ARRAYSIZE(szClass));
-    GetWindowText(hwnd, szName, ARRAYSIZE(szName));
-   }
-   _TCHAR szBuf[80];
-   StringCchPrintf(szBuf, ARRAYSIZE(szBuf), TEXT("%p %s \"%s\" (%s)"), hwnd, pszAction, szName, szClass);
-   ListBox_AddString(g_hwndChild, szBuf);
-  }
- }
+    if (hwnd &&
+        idObject == OBJID_WINDOW &&
+        idChild == CHILDID_SELF &&
+        IsToplevel(hwnd))
+    {
+        if(EVENT_OBJECT_CREATE == event)
+        {
+            _TCHAR szClass[255] = {0};
+            _TCHAR szName[255] = {0};
+            GetClassName(hwnd, szClass, ARRAYSIZE(szClass));
+            GetWindowText(hwnd, szName, ARRAYSIZE(szName));
+            string name(szName);
+            string classname(szClass);
+            logfile << "Event: class=\"" << classname << "\" title=\"" << name << "\"\n";
+            for(auto &cfg : searchList)
+            {
+                logfile << "  " << cfg.title << "\n";
+                if(cfg.classname.length() != 0 && classname.find(cfg.classname) != string::npos)
+                {
+                    alert_window_created(event, hwnd);
+                    break;
+                }
+                else if(cfg.title.length() != 0 && name.find(cfg.title) != string::npos)
+                {
+                    alert_window_created(event, hwnd);
+                    break;
+                }
+                // only check process if needed... it can be slower!
+                //  recommend finding a way to avoid this
+                else if(cfg.process.length() != 0)
+                {
+                    string procname = GetProcessNameForWindow(hwnd);
+                    if(procname.find(cfg.process) != string::npos)
+                    {
+                        alert_window_created(event, hwnd);
+                        break;
+                    }
+                    break;
+                }
+            }
+        }
+        else
+        {
+            for(auto search_hwnd : trackedWindows)
+            {
+                if(search_hwnd == hwnd)
+                {
+                    alert_window_destroyed(hwnd);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /*
@@ -155,12 +209,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uiMsg, WPARAM wParam, LPARAM lParam)
     HANDLE_MSG(hwnd, WM_SIZE, OnSize);
     HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);
     HANDLE_MSG(hwnd, WM_PAINT, OnPaint);
-    case WM_PRINTCLIENT: OnPrintClient(hwnd, (HDC)wParam); return 0;
     }
     return DefWindowProc(hwnd, uiMsg, wParam, lParam);
 }
 
-BOOL InitApp(void)
+bool InitApp(void)
 {
     WNDCLASS wc;
     wc.style = 0;
@@ -173,9 +226,55 @@ BOOL InitApp(void)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszMenuName = NULL;
     wc.lpszClassName = TEXT("Scratch");
-    if (!RegisterClass(&wc)) return FALSE;
-    InitCommonControls();               /* In case we use a common control */
-    return TRUE;
+    if (!RegisterClass(&wc)) return false;
+    InitCommonControls(); 
+    return true;
+}
+
+bool ReadConfig()
+{
+    inipp::Ini<char> ini;
+    std::ifstream is("config.ini");
+    ini.parse(is);
+    ini.default_section(ini.sections["default"]);
+    ini.interpolate();
+    for(auto& section : ini.sections)
+    {
+        if(section.first == "default")
+        {
+            // general config
+            inipp::get_value(section.second, "topic", topic);
+            logfile << "MQTT topic: " << topic << "\n";
+            string server;
+            inipp::get_value(section.second, "server", server);
+            logfile << "MQTT server: " << server << "\n";
+            bool registerHA = false;
+            inipp::get_value(section.second, "homeassistant", registerHA);
+            if(registerHA) logfile << "Sending HA registration\n";
+        }
+        else
+        {
+            // per-window config
+            WindowConfig data;
+            if(section.second.count("title") != 0)
+            {
+                inipp::get_value(section.second, "title", data.title);
+                logfile << "Searching for: title=\"" << data.title << "\"\n";
+            }
+            else if(section.second.count("class") != 0)
+            {
+                inipp::get_value(section.second, "class", data.classname);
+                logfile << "Searching for: class=\"" << data.classname << "\"\n";
+            }
+            else
+            {  
+                logfile << "Invalid section" << section.first << "\n";
+                continue;
+            }
+            searchList.push_back(data);
+        }
+    }
+    return true;
 }
 
 int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hinstPrev,
@@ -184,32 +283,33 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hinstPrev,
     MSG msg;
     HWND hwnd;
     g_hinst = hinst;
-    if (!InitApp()) return 0;
-    if (SUCCEEDED(CoInitialize(NULL))) {/* In case we use COM */
-        hwnd = CreateWindow(
-            TEXT("Scratch"),                /* Class Name */
-            TEXT("Scratch"),                /* Title */
-            WS_OVERLAPPEDWINDOW,            /* Style */
-            CW_USEDEFAULT, CW_USEDEFAULT,   /* Position */
-            CW_USEDEFAULT, CW_USEDEFAULT,   /* Size */
-            NULL,                           /* Parent */
-            NULL,                           /* No menu */
-            hinst,                          /* Instance */
-            0);                             /* No special parameters */
-        ShowWindow(hwnd, nShowCmd);
+    logfile.open("log.txt");
+    if(!InitApp()) return 0;
+    if(!ReadConfig()) return 0;
 
-        HWINEVENTHOOK hWinEventHook = SetWinEventHook(
-             EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
-             NULL, WinEventProc, 0, 0,
-             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    hwnd = CreateWindow(
+        TEXT("Scratch"),                /* Class Name */
+        TEXT("Scratch"),                /* Title */
+        WS_OVERLAPPEDWINDOW,            /* Style */
+        CW_USEDEFAULT, CW_USEDEFAULT,   /* Position */
+        CW_USEDEFAULT, CW_USEDEFAULT,   /* Size */
+        NULL,                           /* Parent */
+        NULL,                           /* No menu */
+        hinst,                          /* Instance */
+        0);                             /* No special parameters */
+    ShowWindow(hwnd, nShowCmd);
 
-        while (GetMessage(&msg, NULL, 0, 0)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
+    HWINEVENTHOOK hWinEventHook = SetWinEventHook(
+         EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
+         NULL, WinEventProc, 0, 0,
+         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-        if (hWinEventHook) UnhookWinEvent(hWinEventHook);
-        CoUninitialize();
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
+
+    if (hWinEventHook) UnhookWinEvent(hWinEventHook);
+    logfile.close();
     return 0;
 }
