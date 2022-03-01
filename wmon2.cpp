@@ -1,5 +1,5 @@
 #define STRICT
-#include "mqtt/client.h"
+#include "mqtt/async_client.h"
 #include <windows.h>
 #include <tchar.h>
 #include <windowsx.h>
@@ -9,6 +9,7 @@
 #include <fstream>
 #include <list>
 #include <psapi.h>
+#include <map>
 #include <algorithm>
 #include "inipp/inipp/inipp.h"
 
@@ -19,17 +20,25 @@ struct WindowConfig
     string title;
     string classname;
     string process;
-    string message;
-    bool checkFullscreen;
+    string section;
+    bool onlyFullscreen;
+};
+
+struct WindowTracking
+{
+    WindowTracking() {}
+    WindowTracking(const WindowConfig& cfg) : section(cfg.section), onlyFullscreen(cfg.onlyFullscreen) {}
+    string section;
+    bool onlyFullscreen;
 };
 
 HINSTANCE g_hinst;
 std::list<WindowConfig> searchList;
 ofstream logfile;
 string topic;
-std::list<HWND> trackedWindows;
-mqtt::client *mqtt_client = nullptr;
-
+typedef std::map<HWND, WindowTracking> WindowTrackingMap;
+WindowTrackingMap trackedWindows;
+mqtt::async_client *mqtt_client = nullptr;
 
 bool IsToplevel(HWND win)
 {
@@ -61,16 +70,33 @@ string GetProcessNameForWindow(HWND window)
     return string();
 }
 
-void alert_window_created(DWORD event, HWND hwnd)
+void alert_window_created(HWND hwnd, WindowConfig& config)
 {
+    string this_topic = topic + "/wmon/" + config.section;
     logfile << "   MATCHED hwnd=" << hwnd << "\n";
-    trackedWindows.push_back(hwnd);
+    trackedWindows[hwnd] = WindowTracking(config);
+    mqtt::message_ptr pubmsg = mqtt::make_message(this_topic, "on");
+    mqtt_client->publish(pubmsg);
 }
 
-void alert_window_destroyed(std::list<HWND>::iterator it)
+void alert_window_destroyed(WindowTrackingMap::iterator& it)
 {
-    logfile << "   REMOVED hwnd=" << *it << "\n";
+    string this_topic = topic + "/wmon/" + it->second.section;
+    logfile << "   REMOVED hwnd=" << it->first << "\n";
     trackedWindows.erase(it);
+    mqtt::message_ptr pubmsg = mqtt::make_message(this_topic, "off");
+    mqtt_client->publish(pubmsg);
+}
+
+string gethostname_string()
+{
+    TCHAR hostname[128] = {0};
+    DWORD count = 128;
+    if( !GetComputerName( hostname, &count ) )
+    {
+        return string("unknown");
+    }
+    return string(hostname);
 }
 
 void CALLBACK WinEventProc(
@@ -101,12 +127,12 @@ void CALLBACK WinEventProc(
                 logfile << "  " << cfg.title << "\n";
                 if(cfg.classname.length() != 0 && classname.find(cfg.classname) != string::npos)
                 {
-                    alert_window_created(event, hwnd);
+                    alert_window_created(hwnd, cfg);
                     break;
                 }
                 else if(cfg.title.length() != 0 && name.find(cfg.title) != string::npos)
                 {
-                    alert_window_created(event, hwnd);
+                    alert_window_created(hwnd, cfg);
                     break;
                 }
                 // only check process if needed... it can be slower!
@@ -116,7 +142,7 @@ void CALLBACK WinEventProc(
                     string procname = GetProcessNameForWindow(hwnd);
                     if(procname.find(cfg.process) != string::npos)
                     {
-                        alert_window_created(event, hwnd);
+                        alert_window_created(hwnd, cfg);
                         break;
                     }
                     break;
@@ -125,7 +151,7 @@ void CALLBACK WinEventProc(
         }
         else if(EVENT_OBJECT_DESTROY == event)
         {
-            auto it = std::find(trackedWindows.begin(), trackedWindows.end(), hwnd);
+            auto it = trackedWindows.find(hwnd);
             if(it != std::end(trackedWindows))
             {
                 alert_window_destroyed(it);
@@ -162,6 +188,7 @@ bool InitApp(void)
 
 bool ReadConfig()
 {
+    bool registerHA = false;
     inipp::Ini<char> ini;
     std::ifstream is("config.ini");
     ini.parse(is);
@@ -172,28 +199,31 @@ bool ReadConfig()
         if(section.first == "default")
         {
             // general config
-            topic = "wmon_mqtt";
+            topic = gethostname_string();
             inipp::get_value(section.second, "topic", topic);
-            logfile << "MQTT topic: " << topic << "\n";
+            logfile << "MQTT topic: " << topic << "/wmon\n";
             string server;
             inipp::get_value(section.second, "server", server);
             logfile << "MQTT server: " << server << "\n";
             string client_id = "wmon_mqtt";
             inipp::get_value(section.second, "client_id", client_id);
             logfile << "MQTT client_id: " << client_id << "\n";
-            bool registerHA = false;
             inipp::get_value(section.second, "homeassistant", registerHA);
             if(registerHA) logfile << "Sending HA registration\n";
-            mqtt_client = new mqtt::client(server, client_id);
+            mqtt_client = new mqtt::async_client(server, client_id);
             mqtt::connect_options connOpts;
             connOpts.set_keep_alive_interval(20);
             connOpts.set_clean_session(true);
-            mqtt_client->connect(connOpts);
+            logfile << "Connecting to MQTT...\n";
+            mqtt::token_ptr conntok = mqtt_client->connect(connOpts);
+            conntok->wait();
+            logfile << "Connected\n";
         }
         else
         {
             // per-window config
             WindowConfig data;
+            data.section = section.first;
             if(section.second.count("title") != 0)
             {
                 inipp::get_value(section.second, "title", data.title);
@@ -204,12 +234,29 @@ bool ReadConfig()
                 inipp::get_value(section.second, "class", data.classname);
                 logfile << "Searching for: class=\"" << data.classname << "\"\n";
             }
+            else if(section.second.count("process") != 0)
+            {
+                inipp::get_value(section.second, "process", data.process);
+                logfile << "Searching for: process=\"" << data.process << "\"\n";
+            }
             else
             {  
                 logfile << "Invalid section" << section.first << "\n";
                 continue;
             }
+            inipp::get_value(section.second, "fullscreen", data.onlyFullscreen);
             searchList.push_back(data);
+        }
+    }
+    
+    if(registerHA)
+    {
+        for(auto& config : searchList)
+        {
+            string this_topic = topic + "/wmon/" + config.section;
+            mqtt::message_ptr pubmsg = mqtt::make_message("homeassistant/binary_sensor/"+topic+"_"+config.section+"/config", 
+                "{\"name\": \""+topic+" "+config.section+"\", \"device_class\": \"running\", \"state_topic\": \""+this_topic+"\"}");
+            mqtt_client->publish(pubmsg);
         }
     }
     return true;
