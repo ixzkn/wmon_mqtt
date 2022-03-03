@@ -1,0 +1,14 @@
+#include "resource.h"
+
+IDI_NOTIFICATIONICON       ICON         "NotificationIcon.ico"
+
+IDC_CONTEXTMENU MENU
+BEGIN
+    POPUP ""
+    BEGIN
+    MENUITEM "Settings", IDM_SETTINGS
+    MENUITEM "Reload", IDM_RELOAD
+    MENUITEM "E&xit", IDM_EXIT
+    END
+END
+

@@ -7,5 +7,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include_directories(paho.mqtt.c/build/include)
-add_executable(wmon2 WIN32 wmon2.cpp)
+add_executable(wmon2 WIN32 wmon2.cpp wmon2.rc)
 target_link_libraries(wmon2 Comctl32 Ws2_32 ../paho.mqtt.c/build/lib/paho-mqttpp3-static ../paho.mqtt.c/build/lib/paho-mqtt3a-static)

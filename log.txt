@@ -4,7 +4,3 @@ MQTT client_id: wmon_mqtt
 Connecting to MQTT...
 Connected
 Searching for: class="CabinetWClass"
-Event: class="CabinetWClass" title="File Explorer"
-  
-   MATCHED hwnd=0000000000100DFE
-   REMOVED hwnd=0000000000100DFE

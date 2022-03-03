@@ -11,7 +11,10 @@
 #include <psapi.h>
 #include <map>
 #include <algorithm>
+#include <commctrl.h>
 #include "inipp/inipp/inipp.h"
+#include "resource.h"
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 using namespace std;
 
@@ -39,6 +42,9 @@ string topic;
 typedef std::map<HWND, WindowTracking> WindowTrackingMap;
 WindowTrackingMap trackedWindows;
 mqtt::async_client *mqtt_client = nullptr;
+
+class __declspec(uuid("b0cd6357-6468-43a0-be76-a9a16e494920")) TrayIcon;
+UINT const WMAPP_NOTIFYCALLBACK = WM_APP + 1;
 
 bool IsToplevel(HWND win)
 {
@@ -68,6 +74,51 @@ string GetProcessNameForWindow(HWND window)
         return string(str);
     }
     return string();
+}
+
+BOOL AddNotificationIcon(HWND hwnd)
+{
+    NOTIFYICONDATA nid = {sizeof(nid)};
+    nid.hWnd = hwnd;
+    nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE | NIF_SHOWTIP | NIF_GUID;
+    nid.guidItem = __uuidof(TrayIcon);
+    nid.uCallbackMessage = WMAPP_NOTIFYCALLBACK;
+    LoadIconMetric(g_hinst, MAKEINTRESOURCEW(IDI_NOTIFICATIONICON), LIM_SMALL, &nid.hIcon);
+    Shell_NotifyIcon(NIM_ADD, &nid);
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    return Shell_NotifyIcon(NIM_SETVERSION, &nid);
+}
+
+BOOL DeleteNotificationIcon()
+{
+    NOTIFYICONDATA nid = {sizeof(nid)};
+    nid.uFlags = NIF_GUID;
+    nid.guidItem = __uuidof(TrayIcon);
+    return Shell_NotifyIcon(NIM_DELETE, &nid);
+}
+
+void ShowContextMenu(HWND hwnd, POINT pt)
+{
+    HMENU hMenu = LoadMenu(g_hinst, MAKEINTRESOURCE(IDC_CONTEXTMENU));
+    if (hMenu)
+    {
+        HMENU hSubMenu = GetSubMenu(hMenu, 0);
+        if (hSubMenu)
+        {
+            SetForegroundWindow(hwnd);
+            UINT uFlags = TPM_RIGHTBUTTON;
+            if (GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0)
+            {
+                uFlags |= TPM_RIGHTALIGN;
+            }
+            else
+            {
+                uFlags |= TPM_LEFTALIGN;
+            }
+            TrackPopupMenuEx(hSubMenu, uFlags, pt.x, pt.y, hwnd, NULL);
+        }
+        DestroyMenu(hMenu);
+    }
 }
 
 void alert_window_created(HWND hwnd, WindowConfig& config)
@@ -162,9 +213,42 @@ void CALLBACK WinEventProc(
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT uiMsg, WPARAM wParam, LPARAM lParam)
 {
-    if(uiMsg == WM_DESTROY)
+    switch(uiMsg)
     {
+    case WM_DESTROY:
+        DeleteNotificationIcon();
         PostQuitMessage(0);
+        break;
+    case WM_CREATE:
+        AddNotificationIcon(hwnd);
+        break;
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case IDM_SETTINGS:
+            // todo
+            break;
+        case IDM_RELOAD:
+            // todo
+            break;
+        case IDM_EXIT:
+            DestroyWindow(hwnd);
+            break;
+        default:
+            break;
+        }
+        break;
+    case WMAPP_NOTIFYCALLBACK:
+        switch (LOWORD(lParam))
+        {
+        case WM_CONTEXTMENU:
+            {
+                POINT const pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                ShowContextMenu(hwnd, pt);
+            }
+            break;
+        }
+        break;
     }
     return DefWindowProc(hwnd, uiMsg, wParam, lParam);
 }
@@ -283,7 +367,7 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hinstPrev,
         NULL,                           /* No menu */
         hinst,                          /* Instance */
         0);                             /* No special parameters */
-    ShowWindow(hwnd, nShowCmd);
+    ShowWindow(hwnd, SW_HIDE);
 
     HWINEVENTHOOK hWinEventHook = SetWinEventHook(
          EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
