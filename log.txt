@@ -1,6 +1,0 @@
-MQTT topic: ALRAI/wmon
-MQTT server: 10.0.0.2
-MQTT client_id: wmon_mqtt
-Connecting to MQTT...
-Connected
-Searching for: class="CabinetWClass"

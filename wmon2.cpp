@@ -97,7 +97,7 @@ BOOL DeleteNotificationIcon()
     return Shell_NotifyIcon(NIM_DELETE, &nid);
 }
 
-void ShowContextMenu(HWND hwnd, POINT pt)
+void ShowContextMenu(HWND hwnd, int x, int y)
 {
     HMENU hMenu = LoadMenu(g_hinst, MAKEINTRESOURCE(IDC_CONTEXTMENU));
     if (hMenu)
@@ -115,7 +115,7 @@ void ShowContextMenu(HWND hwnd, POINT pt)
             {
                 uFlags |= TPM_LEFTALIGN;
             }
-            TrackPopupMenuEx(hSubMenu, uFlags, pt.x, pt.y, hwnd, NULL);
+            TrackPopupMenuEx(hSubMenu, uFlags, x, y, hwnd, NULL);
         }
         DestroyMenu(hMenu);
     }
@@ -243,8 +243,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT uiMsg, WPARAM wParam, LPARAM lParam)
         {
         case WM_CONTEXTMENU:
             {
-                POINT const pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-                ShowContextMenu(hwnd, pt);
+                ShowContextMenu(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             }
             break;
         }
@@ -282,6 +281,12 @@ bool ReadConfig()
     {
         if(section.first == "default")
         {
+            string logfilename = "";
+            inipp::get_value(section.second, "logfile", logfilename);
+            if(logfilename.length() != 0)
+            {
+                logfile.open(logfilename);
+            }
             // general config
             topic = gethostname_string();
             inipp::get_value(section.second, "topic", topic);
@@ -353,7 +358,6 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hinstPrev,
     HWND hwnd;
     g_hinst = hinst;
     mqtt_client = nullptr;
-    logfile.open("log.txt");
     if(!InitApp()) return 0;
     if(!ReadConfig()) return 0;
 
