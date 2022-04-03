@@ -121,13 +121,33 @@ void ShowContextMenu(HWND hwnd, int x, int y)
     }
 }
 
+void reconnectMQTT()
+{
+    if(mqtt_client)
+    {
+        mqtt::connect_options connOpts;
+        connOpts.set_keep_alive_interval(20);
+        connOpts.set_clean_session(true);
+        logfile << "Connecting to MQTT...\n";
+        mqtt::token_ptr conntok = mqtt_client->connect(connOpts);
+        conntok->wait();
+        logfile << "Connected\n";
+    }
+}
+
 void alert_window_created(HWND hwnd, WindowConfig& config)
 {
     string this_topic = topic + "/wmon/" + config.section;
     logfile << "   MATCHED hwnd=" << hwnd << "\n";
     trackedWindows[hwnd] = WindowTracking(config);
-    mqtt::message_ptr pubmsg = mqtt::make_message(this_topic, "on");
-    mqtt_client->publish(pubmsg);
+    mqtt::message_ptr pubmsg = mqtt::make_message(this_topic, "ON");
+    pubmsg->set_retained(true);
+    try {
+        mqtt_client->publish(pubmsg);
+    } catch(const mqtt::exception &e) {
+        reconnectMQTT();
+        mqtt_client->publish(pubmsg);
+    }
 }
 
 void alert_window_destroyed(WindowTrackingMap::iterator& it)
@@ -135,8 +155,14 @@ void alert_window_destroyed(WindowTrackingMap::iterator& it)
     string this_topic = topic + "/wmon/" + it->second.section;
     logfile << "   REMOVED hwnd=" << it->first << "\n";
     trackedWindows.erase(it);
-    mqtt::message_ptr pubmsg = mqtt::make_message(this_topic, "off");
-    mqtt_client->publish(pubmsg);
+    mqtt::message_ptr pubmsg = mqtt::make_message(this_topic, "OFF");
+    pubmsg->set_retained(true);
+    try {
+        mqtt_client->publish(pubmsg);
+    } catch(const mqtt::exception &e) {
+        reconnectMQTT();
+        mqtt_client->publish(pubmsg);
+    }
 }
 
 string gethostname_string()
@@ -300,13 +326,7 @@ bool ReadConfig()
             inipp::get_value(section.second, "homeassistant", registerHA);
             if(registerHA) logfile << "Sending HA registration\n";
             mqtt_client = new mqtt::async_client(server, client_id);
-            mqtt::connect_options connOpts;
-            connOpts.set_keep_alive_interval(20);
-            connOpts.set_clean_session(true);
-            logfile << "Connecting to MQTT...\n";
-            mqtt::token_ptr conntok = mqtt_client->connect(connOpts);
-            conntok->wait();
-            logfile << "Connected\n";
+            reconnectMQTT();
         }
         else
         {
@@ -335,6 +355,13 @@ bool ReadConfig()
             }
             inipp::get_value(section.second, "fullscreen", data.onlyFullscreen);
             searchList.push_back(data);
+
+            // send off by default for now:
+            string this_topic = topic + "/wmon/" + section.first;
+            mqtt::message_ptr pubmsg = mqtt::make_message(this_topic, "OFF");
+            pubmsg->set_retained(true);
+            mqtt_client->publish(pubmsg);
+            // TODO: scan currently open windows to see if the window is already open when the app starts
         }
     }
     
@@ -345,6 +372,7 @@ bool ReadConfig()
             string this_topic = topic + "/wmon/" + config.section;
             mqtt::message_ptr pubmsg = mqtt::make_message("homeassistant/binary_sensor/"+topic+"_"+config.section+"/config", 
                 "{\"name\": \""+topic+" "+config.section+"\", \"device_class\": \"running\", \"state_topic\": \""+this_topic+"\"}");
+            pubmsg->set_retained(true);
             mqtt_client->publish(pubmsg);
         }
     }
