@@ -38,7 +38,6 @@ All searches match any substring in the full title/classname/process; to only ma
 
 ### Building
 1. get submodules (will pull dependencies)
-2. build submodules: build_deps.bat
 3. build with cmake:
    1. cmake build
    2. cmake --build build
