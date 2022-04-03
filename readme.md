@@ -1,7 +1,7 @@
 Simple program for monitoring windows in Windows as Home Assistant binary_sensor entities via MQTT.
 Does not poll, uses SetWinEventHook to ensure instant response.  Only monitors windows that you specify in the configuration.
 
-I use it to trigger an automation to put the livingroom into movie mode when MPC-HC is opened.
+For example I use it to trigger an automation to put the livingroom into movie mode when MPC-HC is opened, config.ini is currently setup for this.
 
 ### Configuration format
 INI with the following structure:
